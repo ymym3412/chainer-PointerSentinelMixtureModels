@@ -4,7 +4,7 @@ import numpy
 from chainer import cuda, Variable, optimizers, serializers, Chain
 import chainer.functions as F
 import chainer.links as Links
-xp = cuda.cupy
+xp = numpy
 
 import argparse
 import json
@@ -12,6 +12,8 @@ import time
 import os
 import logging
 from collections import deque
+
+import BeamSearch
 
 logging.basicConfig(filename="train.log", level=logging.DEBUG)
 
@@ -103,124 +105,160 @@ def main():
                         help='Window size represented as L. Negative value indicates model use all input.')
     parser.add_argument('--mode', help='"train" or "restart" or "decode"')
     parser.add_argument('--model', help='Choose restart model when restart mode')
+    parser.add_argument('--beam_size', type=int, default=8, help='Beam size for decoding')
+    parser.add_argument('--max_length', type=int, default=50, help='Max length of decode text')
+    parser.add_argument('--data_path', help='Specify file path for encode text')
+    parser.add_argument('--decode_path', help='Specify file path for saving decode text')
     args = parser.parse_args()
 
     # model save directory
     if not os.path.exists(args.out):
-        os.mkdirs(args.out)
+        os.mkdir(args.out)
 
     # vocab and id2wd save directory
     if not os.path.exists("data"):
-        os.mkdirs("data")
+        os.mkdir("data")
 
     embed_dim = args.embed
     hidden_size = args.unit
     window_size = args.L
+    mode = args.mode
+    vocab_path = args.vocab_path
+    id_path = args.id_path
+    beam_size = args.beam_size
 
-    with open("train_data.txt", encoding="utf-8") as f:
-        train_data = [json.loads(line) for line in f]
+    if mode == "train" or mode == "restart":
 
-    if args.mode == "train":
-        # make vocab,id2wd
-        vocab = {}
-        id2wd = {}
-        for data in train_data:
-            input_data, output_data = data["input"], data["output"]
-            for word in input_data:
-                if word not in vocab:
-                    id = len(vocab)
-                    vocab[word] = id
-                    id2wd[id] = word
-            for word in output_data:
-                if word not in vocab:
-                    id = len(vocab)
-                    vocab[word] = id
-                    id2wd[id] = word
+        with open("train_data.txt", encoding="utf-8") as f:
+            train_data = [json.loads(line) for line in f]
 
-        # <eos> is a symbol of end of sentence
-        id = len(vocab)
-        vocab["<eos>"] = id
-        id2wd[id] = "<eos>"
+        if args.mode == "train":
+            # make vocab,id2wd
+            vocab = {}
+            id2wd = {}
+            for data in train_data:
+                input_data, output_data = data["input"], data["output"]
+                for word in input_data:
+                    if word not in vocab:
+                        id = len(vocab)
+                        vocab[word] = id
+                        id2wd[id] = word
+                for word in output_data:
+                    if word not in vocab:
+                        id = len(vocab)
+                        vocab[word] = id
+                        id2wd[id] = word
 
-        # <unk> is a symbol for the word which never appear in training data
-        id = len(vocab)
-        vocab["<unk>"] = id
-        id2wd[id] = "<unk>"
-        vsize = len(vocab)
+            # <eos> is a symbol of end of sentence
+            id = len(vocab)
+            vocab["<eos>"] = id
+            id2wd[id] = "<eos>"
 
-        with open("data/vocab", "w", encoding="utf-8") as wf:
-            wf.write(json.dumps(vocab, ensure_ascii=False))
+            # <unk> is a symbol for the word which never appear in training data
+            id = len(vocab)
+            vocab["<unk>"] = id
+            id2wd[id] = "<unk>"
+            vsize = len(vocab)
 
-        with open("data/id2wd", "w", encoding="utf-8") as wf:
-            wf.write(json.dumps(id2wd, ensure_ascii=False))
+            with open("data/vocab", "w", encoding="utf-8") as wf:
+                wf.write(json.dumps(vocab, ensure_ascii=False))
 
-        model = PointerSentinelMixtureModels(vsize, vsize, embed_dim, hidden_size, window_size, vocab)
+            with open("data/id2wd", "w", encoding="utf-8") as wf:
+                wf.write(json.dumps(id2wd, ensure_ascii=False))
 
-    if args.mode == "restart":
-        vocab_path = args.vocab_path
-        id_path = args.id_path
+            model = PointerSentinelMixtureModels(vsize, vsize, embed_dim, hidden_size, window_size, vocab)
+
+        if args.mode == "restart":
+            with open(vocab_path, "r", encoding="utf-8") as rf:
+                vocab = json.loads(rf.read())
+
+            with open(id_path, "r", encoding="utf-8") as rf:
+                id2wd = json.loads(rf.read())
+            vsize = len(vocab)
+
+            model = PointerSentinelMixtureModels(vsize, vsize, embed_dim, hidden_size, window_size, vocab)
+            serializers.load_npz(args.model, model)
+
+
+        if args.gpu >= 0:
+            # GPU setting
+            xp = cuda.cupy
+            cuda.get_device(args.gpu).use()
+            model.to_gpu()
+
+        optimizer = optimizers.Adam()
+        optimizer.setup(model)
+
+        n = len(train_data)
+        bs = args.batchsize
+        early_stopping = False
+        epoch = 0
+        # repeat reading all training data 10 times
+        for i in range(10):
+            sffindx = list(numpy.random.permutation(n))
+            for j in range(0, n, bs):
+                epoch += 1
+                s = time.time()
+                accum_loss = None
+                batch_data = [train_data[idx] for idx in sffindx[j:(j+bs) if (j+bs) < n else n]]
+                for data in batch_data:
+                    input_data, output_data = data["input"], data["output"]
+                    model.reset_state()
+                    model.zerograds()
+                    # reverse input data for encoder-decoder Models
+                    loss = model(reversed([in_word for in_word in input_data]), [out_word for out_word in output_data])
+                    accum_loss = loss if accum_loss is None else accum_loss + loss
+                logging.info("epoch: {}, batchsize: {}, loss: {}".format(str(epoch), str(bs), str(accum_loss.data[0])))
+                accum_loss.backward()
+                accum_loss.unchain_backward()
+                optimizer.update()
+                e = time.time()
+                logging.info("epoch {}'s calc time {}".format(str(epoch), str(e-s)))
+                # save model every 500 epoch
+                if epoch % 5 == 0:
+                    outfile = "PointerSentinelMixtureModels-{}.model".format(str(epoch))
+                    serializers.save_npz(args.out + "/" + outfile, model)
+                    logging.info("Saved Models as {}".format(outfile))
+
+                # early stop if loss of one data less than 0.1
+                if accum_loss.data[0] < bs * 0.1:
+                    early_stopping = True
+                    break
+
+            if early_stopping:
+                break
+
+        outfile = "PointerSentinelMixtureModels-Final.model"
+        serializers.save_npz(outfile, model)
+        logging.info("Saved Models as {}".format(outfile))
+
+    elif mode == "decode":
+        beam_size = args.beam_size
+        max_length = args.max_length
+        data_dir = args.data_path
+        decode_dir = args.decode_path
 
         with open(vocab_path, "r", encoding="utf-8") as rf:
             vocab = json.loads(rf.read())
 
         with open(id_path, "r", encoding="utf-8") as rf:
             id2wd = json.loads(rf.read())
+
+        with open(data_dir, "r", encoding="utf-8") as rf:
+            encode_data = [json.loads(line)["input"] for line in rf]
         vsize = len(vocab)
 
         model = PointerSentinelMixtureModels(vsize, vsize, embed_dim, hidden_size, window_size, vocab)
         serializers.load_npz(args.model, model)
+        model.to_cpu()
 
+        bs = BeamSearch.BeamSearch(model, beam_size, max_length, vocab, id2wd)
 
-    if args.gpu >= 0:
-        # GPU setting
-        cuda.get_device(args.gpu).use()
-        model.to_gpu()
+        decode_texts = [bs.beam_search(reversed(encode_text))[0].tokens[1:] for encode_text in encode_data]
 
-    optimizer = optimizers.Adam()
-    optimizer.setup(model)
-
-    n = len(train_data)
-    bs = args.batchsize
-    early_stopping = False
-    epoch = 0
-    # repeat reading all training data 10 times
-    for i in range(10):
-        sffindx = list(numpy.random.permutation(n))
-        for j in range(0, n, bs):
-            epoch += 1
-            s = time.time()
-            accum_loss = None
-            batch_data = [train_data[idx] for idx in sffindx[j:(j+bs) if (j+bs) < n else n]]
-            for data in batch_data:
-                input_data, output_data = data["input"], data["output"]
-                model.reset_state()
-                model.zerograds()
-                # reverse input data for encoder-decoder Models
-                loss = model(reversed([in_word for in_word in input_data]), [out_word for out_word in output_data])
-                accum_loss = loss if accum_loss is None else accum_loss + loss
-            logging.info("epoch: {}, batchsize: {}, loss: {}".format(str(epoch), str(bs), str(accum_loss.data[0])))
-            accum_loss.backward()
-            accum_loss.unchain_backward()
-            optimizer.update()
-            e = time.time()
-            logging.info("epoch {}'s calc time {}".format(str(epoch), str(e-s)))
-            # save model every 500 epoch
-            if epoch % 5 == 0:
-                outfile = "PointerSentinelMixtureModels-{}.model".format(str(epoch))
-                serializers.save_npz(args.out + "/" + outfile, model)
-                logging.info("Saved Models as {}".format(outfile))
-
-            # early stop if loss of one data less than 0.1
-            if accum_loss.data[0] < bs * 0.1:
-                early_stopping = True
-                break
-
-        if early_stopping:
-            break
-
-    outfile = "PointerSentinelMixtureModels-Final.model"
-    serializers.save_npz(outfile, model)
-    logging.info("Saved Models as {}".format(outfile))
+        with open(decode_dir, "w", encoding="utf-8") as wf:
+            for decode_text in decode_texts:
+                wf.write("".join(decode_text) + "\n")
 
 if __name__ == "__main__":
     logging.info("Learning Start!")
