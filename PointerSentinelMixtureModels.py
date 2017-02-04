@@ -89,13 +89,13 @@ class PointerSentinelMixtureModels(Chain):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batchsize', '-b', type=int, default=1000,
+    parser.add_argument('--batchsize', '-b', type=int, default=32,
                         help='Number of examples in each mini-batch')
     parser.add_argument('--gpu', '-g', type=int, default=-1,
                         help='GPU ID (negative value indicates CPU)')
-    parser.add_argument('--embed', '-e', type=int, default=200,
+    parser.add_argument('--embed', '-e', type=int, default=128,
                         help='Number of units in Embed Layer')
-    parser.add_argument('--unit', '-u', type=int, default=650,
+    parser.add_argument('--unit', '-u', type=int, default=256,
                         help='Number of LSTM units')
     parser.add_argument('--out', '-o', default='result',
                         help='Directory to save the chainer models')
