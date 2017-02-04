@@ -215,7 +215,7 @@ def main():
                 e = time.time()
                 logging.info("epoch {}'s calc time {}".format(str(epoch), str(e-s)))
                 # save model every 500 epoch
-                if epoch % 5 == 0:
+                if epoch % 500 == 0:
                     outfile = "PointerSentinelMixtureModels-{}.model".format(str(epoch))
                     serializers.save_npz(args.out + "/" + outfile, model)
                     logging.info("Saved Models as {}".format(outfile))
