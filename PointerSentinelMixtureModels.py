@@ -125,7 +125,6 @@ def main():
     mode = args.mode
     vocab_path = args.vocab_path
     id_path = args.id_path
-    beam_size = args.beam_size
 
     if mode == "train" or mode == "restart":
 
