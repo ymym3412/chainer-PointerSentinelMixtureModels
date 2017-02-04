@@ -7,7 +7,7 @@ Chainer v1.15.0.1
 ## Running
 ### Training data format
 You can prepare traing data as `train_data.txt`. In `train_data.txt`, every line has one JSON which has input data and output data represented as list.  
-This means following format sample
+This means following format
 ```
 {"input": ["I", "have", "a", "pen", ".", "I", "have", "an", "apple", "."], "output": ["apple", "pen"]}
 {"input": ["I", "have", "a", "pen", ".", "I", "have", "a", "pineapple", "."], "output": ["pineapple", "pen"]}
@@ -30,7 +30,16 @@ $ python  PointerSentinelMixtureModels.py --batchsize=64 --gpu=0 --embed=128 --u
 ```
 Meaing of parameters are written in `PointerSentinelMixtureModels.py` file. Please read once.
 
-### Training logging
+### Decoding
+After training, you can start decoding. In this code, I used beam search algorithm(this is not refered in paper).  
+You can start decoding like following command:
+```shell
+$ python  PointerSentinelMixtureModels.py --embed=128 --unit=256  -L=30 --mode=decode --vocab_path=data/vocab --id_path=data/id2wd --model=result/PointerSentinelMixtureModels-500.model --data_path=train_data.txt --decode_path=decode.txt --beam_size=8 --max_length=30
+```
+`--data_path` is a parameter to specify file for encoding.  
+Encoding file is required JSON format which has `input` parameter that have array object in every line.  
+
+### Training log
 In code, information about training(epoch, barchsize, batch loss) is recorded in log file `train.log`. 
 ```
 INFO:root:Learning Start!
